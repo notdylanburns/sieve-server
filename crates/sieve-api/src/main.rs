@@ -12,6 +12,7 @@ mod devices;
 pub(crate) mod error;
 mod events;
 mod frontend;
+mod google;
 mod icons;
 mod invites;
 mod proxy_ca;

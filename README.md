@@ -44,6 +44,14 @@ reachable. Caddy gets a certificate from Let's Encrypt automatically.
 
 4. Sign in at `https://$DOMAIN`. Owners can invite other people from the **Invites** page.
 
+   To offer **Sign in with Google**, create a *Web application* OAuth client in Google Cloud
+   with the authorized redirect URI `https://$DOMAIN/auth/redirect/google`, put its client id
+   and secret in `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, and run
+   `docker compose up -d api`. Anyone with a verified Google address can then sign in. Their
+   first sign-in creates a user named after their email, with no password and no workspaces,
+   so they see nothing until they open an invite link. The client id and secret are in the
+   `client_secret_*.json` file Google offers to download.
+
 5. Add a device on the **Devices** page (or `sieve device create <workspace-id> <name>`). Copy
    its token and proxy credentials; they aren't shown again.
 

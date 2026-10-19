@@ -34,6 +34,9 @@ services:
       PROXY_CA_CERT: /var/lib/squid-ca-public/ca.crt
       TRUSTED_PROXIES: ${SIEVE_SUBNET:-172.31.250.0/24}
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      PUBLIC_URL: https://${DOMAIN}
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - icons:/var/lib/sieve/icons:ro

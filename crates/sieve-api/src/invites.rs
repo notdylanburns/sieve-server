@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
+use axum::routing::{Router, delete, get, post};
 use axum::{Extension, Json};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
@@ -20,6 +21,20 @@ use crate::workspace::OwnerWorkspace;
 const DEFAULT_EXPIRY_DAYS: u32 = 7;
 const MAX_EXPIRY_DAYS: u32 = 30;
 const MAX_USES: i32 = 1000;
+
+/// Managing a workspace's invites, for its owners.
+pub(crate) fn workspace_routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list).post(create))
+        .route("/{invite_id}", delete(revoke))
+}
+
+/// Opening an invite link, for whoever it was sent to.
+pub(crate) fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/{token}", get(preview))
+        .route("/{token}/accept", post(accept))
+}
 
 #[derive(serde::Serialize)]
 pub(crate) struct InviteView {
