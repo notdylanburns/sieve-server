@@ -8,6 +8,7 @@ use crate::config;
 use crate::database::WorkspaceId;
 
 pub const SESSION_TTL: TimeDelta = TimeDelta::hours(12);
+pub const OAUTH_TTL: TimeDelta = TimeDelta::minutes(10);
 const MIN_SECRET_BYTES: usize = 32;
 const LEEWAY_SECONDS: i64 = 60;
 
@@ -20,6 +21,18 @@ pub enum Claims {
     /// Names an invite row, which stays authoritative for revocation and use limits.
     /// Never accepted as a credential.
     Invite { sub: Box<str>, ws: WorkspaceId, exp: i64 },
+    /// A Google sign-in in progress, held in a cookie while the browser is away at Google.
+    /// Never accepted as a credential.
+    OAuth { state: Box<str>, verifier: Box<str>, next: Box<str>, exp: i64 },
+}
+
+/// What a Google sign-in needs to remember while the browser is away at Google.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthState {
+    pub state: Box<str>,
+    pub verifier: Box<str>,
+    /// Where to send the user once they're signed in.
+    pub next: Box<str>,
 }
 
 pub struct Keys {
@@ -100,6 +113,23 @@ impl Keys {
         }
     }
 
+    pub fn issue_oauth(&self, oauth: &OAuthState) -> jsonwebtoken::errors::Result<Box<str>> {
+        self.encode(&Claims::OAuth {
+            state: oauth.state.clone(),
+            verifier: oauth.verifier.clone(),
+            next: oauth.next.clone(),
+            exp: (Utc::now() + OAUTH_TTL).timestamp(),
+        })
+    }
+
+    /// Returns None for anything but a genuine, unexpired sign-in token.
+    pub fn verify_oauth(&self, token: &str) -> Option<OAuthState> {
+        match self.verify(token)? {
+            Claims::OAuth { state, verifier, next, .. } => Some(OAuthState { state, verifier, next }),
+            _ => None,
+        }
+    }
+
     fn encode(&self, claims: &Claims) -> jsonwebtoken::errors::Result<Box<str>> {
         jsonwebtoken::encode(&Header::new(Algorithm::HS256), claims, &self.encoding)
             .map(String::into_boxed_str)
@@ -113,7 +143,11 @@ impl Keys {
 
         let expired = |exp: i64| exp + LEEWAY_SECONDS < Utc::now().timestamp();
         match claims {
-            Claims::User { exp, .. } | Claims::Invite { exp, .. } if expired(exp) => None,
+            Claims::User { exp, .. } | Claims::Invite { exp, .. } | Claims::OAuth { exp, .. }
+                if expired(exp) =>
+            {
+                None
+            }
             claims => Some(claims),
         }
     }
@@ -185,5 +219,20 @@ mod tests {
 
         let other = Keys::from_base64(&STANDARD.encode([9u8; MIN_SECRET_BYTES])).unwrap();
         assert_eq!(other.verify_invite(&token), None);
+    }
+
+    #[test]
+    fn oauth_tokens_round_trip_and_are_only_valid_as_oauth() {
+        let keys = test_keys();
+        let oauth = OAuthState { state: "s".into(), verifier: "v".into(), next: "/w/1".into() };
+
+        let token = keys.issue_oauth(&oauth).unwrap();
+        assert_eq!(keys.verify_oauth(&token), Some(oauth));
+        assert_eq!(keys.verify_oauth(&keys.issue_user(1).unwrap()), None);
+
+        let expired = keys
+            .encode(&Claims::OAuth { state: "s".into(), verifier: "v".into(), next: "/".into(), exp: 1 })
+            .unwrap();
+        assert_eq!(keys.verify_oauth(&expired), None);
     }
 }

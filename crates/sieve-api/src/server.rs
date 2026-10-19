@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::{delete, get, post};
+use axum::routing::get;
 use log::{error, info};
 use sieve_common::audit;
 use sieve_common::database;
@@ -15,6 +15,7 @@ use sqlx::PgPool;
 use crate::config::Config;
 use crate::error::{self, ApiError};
 use crate::events::{self, Hub};
+use crate::google::{self, Google};
 use crate::state::AppState;
 use crate::{applications, auth, devices, frontend, icons, invites, proxy_ca, sites, videos};
 
@@ -29,27 +30,33 @@ pub(crate) fn router(
     let api = Router::new()
         .nest("/{workspace}/sites", sites::routes())
         .nest("/{workspace}/videos", videos::routes())
+        .nest("/{workspace}/devices", devices::routes())
+        .nest("/{workspace}/invites", invites::workspace_routes())
+        .nest("/invites", invites::routes())
+        .nest("/auth", auth::routes())
         .route("/{workspace}/audit", get(crate::audit::get))
         .route("/{workspace}/applications", get(applications::get))
         .route("/{workspace}/events", get(events::get))
-        .route("/{workspace}/devices", get(devices::list).post(devices::create))
-        .route("/{workspace}/devices/{device_id}", delete(devices::revoke))
-        .route("/{workspace}/invites", get(invites::list).post(invites::create))
-        .route("/{workspace}/invites/{invite_id}", delete(invites::revoke))
-        .route("/invites/{token}", get(invites::preview))
-        .route("/invites/{token}/accept", post(invites::accept))
-        .route("/auth/logout", post(auth::logout))
-        .route("/auth/me", get(auth::me))
         .layer(from_fn_with_state(state.clone(), auth::require_auth))
-        // Added after the auth layer, so it stays reachable without a session.
-        .route("/auth/login", post(auth::login))
-        .route("/proxy-ca.crt", get(move || proxy_ca::get(proxy_ca.clone())))
+        // Added after the auth layer, so these stay reachable without a session.
+        .nest("/auth", auth::public_routes())
+        .route(
+            "/proxy-ca.crt",
+            get(move || proxy_ca::get(proxy_ca.clone())),
+        )
         .fallback(|| async { ApiError::NotFound })
         .layer(from_fn(error::log_error_responses));
 
     let icons = Router::new()
         .nest_service("/static/icons", icons::service(icon_dir))
         .layer(from_fn_with_state(state.clone(), auth::require_auth));
+
+    // Page navigations rather than API calls, outside /api because Google's redirect URI is
+    // registered here.
+    let google = Router::new()
+        .route("/auth/google", get(google::start))
+        .route(google::REDIRECT_PATH, get(google::callback))
+        .layer(from_fn(error::log_error_responses));
 
     let frontend = Router::new()
         .fallback_service(frontend::service(frontend_dir))
@@ -58,6 +65,7 @@ pub(crate) fn router(
     Router::new()
         .nest("/api", api)
         .merge(icons)
+        .merge(google)
         .fallback_service(frontend)
         .with_state(state)
 }
@@ -117,8 +125,19 @@ pub(crate) async fn run() -> ExitCode {
     let hub = Hub::new(events::DEBOUNCE);
     let _ = events::spawn_listener(pool.clone(), hub.clone());
 
-    let state = AppState::new(pool, keys, config.trusted_proxies, hub);
-    let app = router(state, &config.icon_dir, &config.frontend_dir, config.proxy_ca);
+    match &config.google {
+        Some(google) => info!("Google sign-in enabled for client {}", google.client_id),
+        None => info!("Google sign-in disabled: GOOGLE_CLIENT_ID is not set"),
+    }
+    let google = config.google.map(Google::new);
+
+    let state = AppState::new(pool, keys, config.trusted_proxies, hub, google);
+    let app = router(
+        state,
+        &config.icon_dir,
+        &config.frontend_dir,
+        config.proxy_ca,
+    );
 
     let listener = match tokio::net::TcpListener::bind(config.bind_address).await {
         Ok(listener) => listener,

@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
+use axum::routing::{Router, delete, get};
 use axum::{Extension, Json};
 use sieve_common::audit::Actor;
 use sieve_common::database::devices::{self, Device};
@@ -11,6 +12,12 @@ use crate::state::AppState;
 use crate::workspace::OwnerWorkspace;
 
 const MAX_NAME_LEN: usize = 100;
+
+pub(crate) fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list).post(create))
+        .route("/{device_id}", delete(revoke))
+}
 
 #[derive(serde::Deserialize)]
 pub(crate) struct DeviceParams {

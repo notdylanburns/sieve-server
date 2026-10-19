@@ -9,6 +9,7 @@ use sqlx::{PgPool, Transaction};
 
 use crate::error::{ApiError, IntoApiError};
 use crate::events::Hub;
+use crate::google::Google;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -16,6 +17,7 @@ pub(crate) struct AppState {
     pub keys: Arc<Keys>,
     pub trusted_proxies: Arc<[IpNetwork]>,
     pub events: Arc<Hub>,
+    pub google: Option<Arc<Google>>,
 }
 
 impl AppState {
@@ -24,12 +26,14 @@ impl AppState {
         keys: Keys,
         trusted_proxies: Box<[IpNetwork]>,
         events: Arc<Hub>,
+        google: Option<Google>,
     ) -> Self {
         Self {
             pool,
             keys: Arc::new(keys),
             trusted_proxies: trusted_proxies.into(),
             events,
+            google: google.map(Arc::new),
         }
     }
 

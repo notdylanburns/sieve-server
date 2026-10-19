@@ -4,6 +4,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::{Router, get, post};
 use log::warn;
 use serde_json::json;
 use sieve_common::LogError;
@@ -21,6 +22,20 @@ use crate::state::AppState;
 
 pub(crate) const SESSION_COOKIE: &str = "sieve_session";
 
+/// Routes for a signed-in user.
+pub(crate) fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/logout", post(logout))
+        .route("/me", get(me))
+}
+
+/// Routes that must work without a session.
+pub(crate) fn public_routes() -> Router<AppState> {
+    Router::new()
+        .route("/login", post(login))
+        .route("/providers", get(providers))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Principal {
     User(User),
@@ -28,7 +43,7 @@ pub(crate) enum Principal {
 }
 
 impl Principal {
-    fn actor(&self, client: ClientInfo) -> Actor {
+    pub(crate) fn actor(&self, client: ClientInfo) -> Actor {
         let (kind, id, label) = match self {
             Self::User(user) => (ActorKind::User, user.id.to_string(), user.username.clone()),
             Self::Device(device) => (ActorKind::Device, device.id.to_string(), device.name.clone()),
@@ -50,18 +65,20 @@ fn token(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
 
-    let cookie = || {
-        headers
-            .get_all(header::COOKIE)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .flat_map(|value| value.split(';'))
-            .filter_map(|pair| pair.trim().split_once('='))
-            .find(|(name, _)| *name == SESSION_COOKIE)
-            .map(|(_, value)| value)
-    };
+    bearer
+        .or_else(|| cookie(headers, SESSION_COOKIE))
+        .filter(|token| !token.is_empty())
+}
 
-    bearer.or_else(cookie).filter(|token| !token.is_empty())
+pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value)
 }
 
 async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {
@@ -90,7 +107,7 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal
                 .map(Principal::Device)
                 .ok_or(ApiError::Unauthorized)
         }
-        Claims::Invite { .. } => Err(ApiError::Unauthorized),
+        Claims::Invite { .. } | Claims::OAuth { .. } => Err(ApiError::Unauthorized),
     }
 }
 
@@ -161,7 +178,7 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
     }
 }
 
-fn session_cookie(token: &str, max_age: i64) -> HeaderValue {
+pub(crate) fn session_cookie(token: &str, max_age: i64) -> HeaderValue {
     HeaderValue::from_str(&format!(
         "{SESSION_COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age}"
     ))
@@ -290,6 +307,11 @@ pub(crate) async fn logout(
         .headers_mut()
         .insert(header::SET_COOKIE, session_cookie("", 0));
     Ok(response)
+}
+
+/// Which sign-in methods the login page should offer besides a password.
+pub(crate) async fn providers(State(state): State<AppState>) -> impl IntoResponse {
+    Json(json!({ "google": state.google.is_some() }))
 }
 
 pub(crate) async fn me(

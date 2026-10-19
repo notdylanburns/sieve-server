@@ -13,6 +13,14 @@ pub(crate) struct Config {
     pub audit_retention_days: Option<u32>,
     pub trusted_proxies: Box<[IpNetwork]>,
     pub proxy_ca: Option<PathBuf>,
+    pub google: Option<GoogleConfig>,
+}
+
+pub(crate) struct GoogleConfig {
+    pub client_id: Box<str>,
+    pub client_secret: Box<str>,
+    /// The console's own URL, which Google redirects back to.
+    pub public_url: Box<str>,
 }
 
 impl Config {
@@ -42,6 +50,15 @@ impl Config {
                 .collect::<Result<_, _>>()?,
             proxy_ca: match config::var("PROXY_CA_CERT") {
                 Ok(path) => Some(path.into()),
+                Err(Error::Missing(_)) => None,
+                Err(e) => return Err(e),
+            },
+            google: match config::var("GOOGLE_CLIENT_ID") {
+                Ok(client_id) => Some(GoogleConfig {
+                    client_id: client_id.into(),
+                    client_secret: config::var("GOOGLE_CLIENT_SECRET")?.into(),
+                    public_url: config::var("PUBLIC_URL")?.into(),
+                }),
                 Err(Error::Missing(_)) => None,
                 Err(e) => return Err(e),
             },

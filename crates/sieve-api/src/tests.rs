@@ -23,7 +23,9 @@ use tokio_tungstenite::tungstenite::{self, Message};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use crate::config::GoogleConfig;
 use crate::events::{self, Hub};
+use crate::google::Google;
 use crate::server;
 use crate::state::AppState;
 
@@ -53,6 +55,10 @@ impl Drop for TestApp {
 
 impl TestApp {
     fn new(pool: PgPool) -> Self {
+        Self::with_google(pool, None)
+    }
+
+    fn with_google(pool: PgPool, google: Option<Google>) -> Self {
         let dir = std::env::temp_dir().join(format!("sieve-test-{}", Uuid::new_v4()));
         let frontend = dir.join("frontend");
         let icons = dir.join("icons");
@@ -63,7 +69,7 @@ impl TestApp {
         std::fs::write(&proxy_ca, "-----BEGIN CERTIFICATE-----\ntest\n").unwrap();
 
         let hub = Hub::new(Duration::from_millis(100));
-        let state = AppState::new(pool.clone(), keys(), Box::new([]), hub.clone());
+        let state = AppState::new(pool.clone(), keys(), Box::new([]), hub.clone(), google);
         Self {
             router: server::router(state, &icons, &frontend, Some(proxy_ca)),
             pool,
@@ -865,4 +871,205 @@ async fn invite_tokens_are_not_credentials_and_cannot_be_forged(pool: PgPool) {
     assert!(status.is_redirection());
     let location = headers[header::LOCATION].to_str().unwrap();
     assert!(location.starts_with("/login?next=%2Finvite%2F"), "{location}");
+}
+
+fn google_claims(sub: &str, email: &str) -> Value {
+    json!({
+        "iss": "https://accounts.google.com",
+        "aud": "client",
+        "sub": sub,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+        "email": email,
+        "email_verified": true,
+    })
+}
+
+type TokenRequests = Arc<std::sync::Mutex<Vec<std::collections::HashMap<String, String>>>>;
+
+/// Google's token endpoint, answering every code with an ID token carrying `claims`.
+async fn mock_google(claims: Value) -> (Google, TokenRequests, tokio::task::JoinHandle<()>) {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let requests = TokenRequests::default();
+    let id_token = format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(claims.to_string()));
+    let router = Router::new().route(
+        "/token",
+        axum::routing::post({
+            let requests = requests.clone();
+            move |axum::Form(form): axum::Form<std::collections::HashMap<String, String>>| {
+                requests.lock().unwrap().push(form);
+                let id_token = id_token.clone();
+                async move { axum::Json(json!({ "id_token": id_token, "access_token": "a" })) }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let mut google = Google::new(GoogleConfig {
+        client_id: "client".into(),
+        client_secret: "secret".into(),
+        public_url: "https://sieve.example.com".into(),
+    });
+    google.token_url = format!("http://{addr}/token").into();
+    (google, requests, task)
+}
+
+fn set_cookies(headers: &HeaderMap) -> Vec<&str> {
+    headers.get_all(header::SET_COOKIE).iter().map(|value| value.to_str().unwrap()).collect()
+}
+
+impl TestApp {
+    /// Starts a Google sign-in, returning the query Google was sent and the state cookie.
+    async fn start_google(&self, next: &str) -> (std::collections::HashMap<String, String>, String) {
+        let next = url::form_urlencoded::byte_serialize(next.as_bytes()).collect::<String>();
+        let (status, headers, _) = self
+            .send(Request::get(format!("/auth/google?next={next}")).body(Body::empty()).unwrap())
+            .await;
+        assert!(status.is_redirection());
+
+        let location = url::Url::parse(headers[header::LOCATION].to_str().unwrap()).unwrap();
+        assert_eq!(location.host_str(), Some("accounts.google.com"));
+        let cookie = set_cookies(&headers)[0];
+        for attribute in ["HttpOnly", "Secure", "SameSite=Lax", "Path=/auth"] {
+            assert!(cookie.contains(attribute), "{cookie} lacks {attribute}");
+        }
+        let query = location.query_pairs().into_owned().collect();
+        (query, cookie.split(';').next().unwrap().to_owned())
+    }
+
+    async fn finish_google(&self, query: &str, cookie: Option<&str>) -> (StatusCode, HeaderMap, Bytes) {
+        let mut request = Request::get(format!("/auth/redirect/google?{query}"));
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
+        }
+        self.send(request.body(Body::empty()).unwrap()).await
+    }
+}
+
+#[sqlx::test(migrator = "sieve_common::database::MIGRATOR")]
+async fn google_sign_in_creates_the_user_once_and_signs_them_in(pool: PgPool) {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use sha2::{Digest, Sha256};
+
+    let (google, requests, task) = mock_google(google_claims("g-1", "amanda@example.com")).await;
+    let app = TestApp::with_google(pool, Some(google));
+    app.tasks.lock().unwrap().push(task);
+
+    let (_, _, body) = app.send(Request::get("/api/auth/providers").body(Body::empty()).unwrap()).await;
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), json!({ "google": true }));
+
+    let mut user_id = None;
+    for code in ["code-1", "code-2"] {
+        let (query, cookie) = app.start_google("/invite/abc").await;
+        let (status, headers, body) = app
+            .finish_google(&format!("code={code}&state={}", query["state"]), Some(&cookie))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(std::str::from_utf8(&body).unwrap().contains(r#"location.replace("/invite/abc")"#));
+
+        let request = requests.lock().unwrap().pop().unwrap();
+        assert_eq!(request["code"], code);
+        assert_eq!(request["client_secret"], "secret");
+        assert_eq!(request["redirect_uri"], "https://sieve.example.com/auth/redirect/google");
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(request["code_verifier"].as_bytes()));
+        assert_eq!(challenge, query["code_challenge"]);
+
+        let cookies = set_cookies(&headers);
+        let session = cookies.iter().find(|c| c.starts_with("sieve_session=")).unwrap();
+        assert!(session.contains("SameSite=Strict"), "{session}");
+        assert!(cookies.iter().any(|c| c.starts_with("sieve_oauth=;") && c.contains("Max-Age=0")));
+
+        let (status, _, body) = app
+            .send(
+                Request::get("/api/auth/me")
+                    .header(header::COOKIE, session.split(';').next().unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let me: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(me["user"]["username"], "amanda@example.com");
+        assert_eq!(*user_id.get_or_insert(me["user"]["id"].clone()), me["user"]["id"]);
+    }
+
+    let actions: Vec<_> = app.audit(None).await.into_iter().map(|e| e.action).collect();
+    assert_eq!(actions, ["auth.login".into(), "auth.login".into(), "user.create".into()] as [Box<str>; 3]);
+
+    // Google users have no password, so password sign-in can never match them.
+    let (status, _) = app
+        .call(
+            Method::POST,
+            "/api/auth/login",
+            None,
+            Some(json!({ "username": "amanda@example.com", "password": "" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrator = "sieve_common::database::MIGRATOR")]
+async fn google_sign_in_rejects_forged_or_stale_callbacks(pool: PgPool) {
+    let (google, requests, task) = mock_google(google_claims("g-1", "amanda@example.com")).await;
+    let app = TestApp::with_google(pool, Some(google));
+    app.tasks.lock().unwrap().push(task);
+
+    let (query, cookie) = app.start_google("/w/1/sites").await;
+    let failures = [
+        (format!("code=c&state=wrong"), Some(cookie.as_str())),
+        (format!("code=c&state={}", query["state"]), None),
+        (format!("error=access_denied&state={}", query["state"]), Some(cookie.as_str())),
+    ];
+    for (callback, cookie) in failures {
+        let (status, headers, _) = app.finish_google(&callback, cookie).await;
+        assert!(status.is_redirection(), "{callback}");
+        let location = headers[header::LOCATION].to_str().unwrap();
+        assert!(location.starts_with("/login?error=google"), "{location}");
+        assert!(!set_cookies(&headers).iter().any(|c| c.starts_with("sieve_session=")));
+    }
+    assert_eq!(
+        app.finish_google("code=c&state=wrong", Some(&cookie)).await.1[header::LOCATION],
+        "/login?error=google&next=%2Fw%2F1%2Fsites"
+    );
+    assert!(requests.lock().unwrap().is_empty(), "no code should have been exchanged");
+}
+
+#[sqlx::test(migrator = "sieve_common::database::MIGRATOR")]
+async fn google_sign_in_keeps_usernames_unique(pool: PgPool) {
+    let (google, _, task) = mock_google(google_claims("g-1", "amanda")).await;
+    let app = TestApp::with_google(pool, Some(google));
+    app.tasks.lock().unwrap().push(task);
+    app.user("amanda", "password1").await;
+
+    let (query, cookie) = app.start_google("/").await;
+    let (status, headers, _) = app
+        .finish_google(&format!("code=c&state={}", query["state"]), Some(&cookie))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let session = set_cookies(&headers)
+        .into_iter()
+        .find(|c| c.starts_with("sieve_session="))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+
+    let (_, _, body) = app
+        .send(Request::get("/api/auth/me").header(header::COOKIE, session).body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["user"]["username"], "amanda#g-1");
+}
+
+#[sqlx::test(migrator = "sieve_common::database::MIGRATOR")]
+async fn google_sign_in_is_off_without_configuration(pool: PgPool) {
+    let app = TestApp::new(pool);
+
+    let (_, _, body) = app.send(Request::get("/api/auth/providers").body(Body::empty()).unwrap()).await;
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), json!({ "google": false }));
+
+    let (status, _, _) = app.send(Request::get("/auth/google").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
