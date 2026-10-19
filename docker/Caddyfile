@@ -4,7 +4,13 @@
 	layer4 {
 		:3129 {
 			route {
-				tls
+				# Squid only speaks HTTP/1.1. Chromium offers h2 to HTTPS proxies and, if it's
+				# accepted, opens with the HTTP/2 preface, which Squid rejects.
+				tls {
+					connection_policy {
+						alpn http/1.1
+					}
+				}
 				proxy squid:3128
 			}
 		}
