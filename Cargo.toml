@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/sieve-squid-helpers", "crates/sieve-api", "crates/sieve-cli", "crates/sieve-common", "crates/sieve-metadata-cache"]
+resolver = "3"
+
+# Password hashing is unusably slow unoptimised, which makes debug builds and tests crawl.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[workspace.dependencies]
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres", "macros", "migrate", "json", "chrono", "uuid", "ipnetwork"] }
+uuid = { version = "1.28.0", features = ["serde", "v4"] }
+serde_json = "1.0.151"

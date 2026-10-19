@@ -1,0 +1,116 @@
+name: sieve
+
+x-database-url: &database-url postgres://sieve:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/sieve
+
+services:
+  postgres:
+    image: docker.io/library/postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sieve
+      POSTGRES_USER: sieve
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Loopback only by default; set POSTGRES_BIND=0.0.0.0 to read the database over the network.
+    ports:
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sieve -d sieve"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: localhost/sieve-api
+    restart: unless-stopped
+    init: true
+    environment:
+      DATABASE_URL: *database-url
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      PROXY_CA_CERT: /var/lib/squid-ca-public/ca.crt
+      TRUSTED_PROXIES: ${SIEVE_SUBNET:-172.31.250.0/24}
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - icons:/var/lib/sieve/icons:ro
+      - squid-ca-public:/var/lib/squid-ca-public:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  metadata-cache:
+    build:
+      context: .
+      dockerfile: docker/metadata-cache.Dockerfile
+    image: localhost/sieve-metadata-cache
+    restart: unless-stopped
+    init: true
+    environment:
+      DATABASE_URL: *database-url
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - icons:/var/lib/sieve/icons
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  squid:
+    build:
+      context: .
+      dockerfile: docker/squid.Dockerfile
+    image: localhost/sieve-squid
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: *database-url
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - squid-ca:/var/lib/squid-ca
+      - squid-ca-public:/var/lib/squid-ca-public
+    # Generated host certificates; rebuilt at every start, so no need to persist them.
+    tmpfs:
+      - /var/spool/squid
+    # Deliberately unpublished: clients reach Squid only through Caddy's TLS listener.
+    expose:
+      - "3128"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  caddy:
+    build:
+      context: .
+      dockerfile: docker/caddy.Dockerfile
+    image: localhost/sieve-caddy
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+      - "${PROXY_PORT:-3129}:3129"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+      - squid
+
+# A fixed subnet so the API can trust X-Forwarded-For from Caddy (TRUSTED_PROXIES).
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${SIEVE_SUBNET:-172.31.250.0/24}
+
+volumes:
+  pgdata:
+  icons:
+  squid-ca:
+  squid-ca-public:
+  caddy-data:
+  caddy-config:

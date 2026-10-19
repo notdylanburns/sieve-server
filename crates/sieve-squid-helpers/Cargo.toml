@@ -1,0 +1,13 @@
+[package]
+name = "sieve-squid-helpers"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sieve-common = { path = "../sieve-common/" }
+chrono = "0.4.45"
+log = "0.4.34"
+percent-encoding = "2.3.2"
+sqlx = { workspace = true }
+tokio = { version = "1.53.1", features = ["rt", "macros", "io-std", "io-util"] }
+url = "2.5.8"

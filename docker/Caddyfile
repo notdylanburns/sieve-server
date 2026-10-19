@@ -1,0 +1,17 @@
+{
+	# The proxy port: terminate the client's TLS with this site's certificate, then hand the raw
+	# stream to Squid, which sees an ordinary explicit-proxy connection.
+	layer4 {
+		:3129 {
+			route {
+				tls
+				proxy squid:3128
+			}
+		}
+	}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:8080
+}
