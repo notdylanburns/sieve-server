@@ -4,7 +4,6 @@ use crate::state::AppState;
 
 mod domains;
 mod lookup;
-mod meta;
 mod paths;
 
 pub(super) fn routes() -> Router<AppState> {
