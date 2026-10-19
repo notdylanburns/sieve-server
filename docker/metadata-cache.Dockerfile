@@ -16,12 +16,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM docker.io/library/debian:trixie-slim AS tools
 ARG YT_DLP_VERSION=2026.08.19
 ARG DENO_VERSION=v2.9.7
-RUN apt-get update \
+# Set by BuildKit to the platform being built for, e.g. amd64 or arm64.
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+        amd64) yt_dlp_asset=yt-dlp_linux; deno_arch=x86_64 ;; \
+        arm64) yt_dlp_asset=yt-dlp_linux_aarch64; deno_arch=aarch64 ;; \
+        *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl unzip \
     && curl -fsSL -o /usr/local/bin/yt-dlp \
-        "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp_linux" \
+        "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/${yt_dlp_asset}" \
     && curl -fsSL -o /tmp/deno.zip \
-        "https://github.com/denoland/deno/releases/download/${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
+        "https://github.com/denoland/deno/releases/download/${DENO_VERSION}/deno-${deno_arch}-unknown-linux-gnu.zip" \
     && unzip /tmp/deno.zip -d /usr/local/bin \
     && chmod 0755 /usr/local/bin/yt-dlp /usr/local/bin/deno
 
