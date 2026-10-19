@@ -54,12 +54,30 @@ services:
     init: true
     environment:
       DATABASE_URL: *database-url
+      YT_DLP_PROXY: ${YT_DLP_PROXY:-}
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - icons:/var/lib/sieve/icons
     depends_on:
       postgres:
         condition: service_healthy
+
+  # Optional (COMPOSE_PROFILES=tailscale): a SOCKS5 proxy whose traffic leaves through an exit
+  # node on another network, for yt-dlp, because YouTube makes datacentre addresses sign in.
+  # Unpublished, and only yt-dlp is pointed at it, so nothing else leaves that way.
+  tailscale:
+    image: docker.io/tailscale/tailscale:v1.102.5
+    profiles: [tailscale]
+    restart: unless-stopped
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_HOSTNAME: ${TS_HOSTNAME:-sieve-metadata}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      TS_SOCKS5_SERVER: ":1055"
+      TS_EXTRA_ARGS: --exit-node=${TS_EXIT_NODE:-}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
 
   squid:
     build:
@@ -117,3 +135,4 @@ volumes:
   squid-ca-public:
   caddy-data:
   caddy-config:
+  tailscale-state:
