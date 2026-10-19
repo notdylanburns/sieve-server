@@ -86,6 +86,21 @@ Sites the workspace hasn't approved get `403`; wrong credentials get `407`.
 - **Client IPs in the audit log** come from Caddy's `X-Forwarded-For`. Under rootless Podman,
   published ports hide the client address, so every request appears to come from Caddy; rootful
   Docker passes the real address through.
+- **Videos with no title or thumbnail** on a cloud host: the metadata cache's log shows
+  `Sign in to confirm you're not a bot`, because YouTube makes datacentre addresses sign in.
+  Send yt-dlp out through a home connection instead, with Tailscale:
+  1. Make an always-on machine at home a Tailscale exit node (`tailscale set
+     --advertise-exit-node`) and approve it in the admin console.
+  2. Create a reusable auth key, tagged if your ACLs require it, and allow it to use exit nodes.
+  3. In `.env`, set `COMPOSE_PROFILES=tailscale`, `TS_AUTHKEY`, `TS_EXIT_NODE` (the exit
+     node's name or Tailscale IP) and `YT_DLP_PROXY=socks5://tailscale:1055`.
+  4. `docker compose up -d`, then refetch with
+     `docker compose run --rm metadata-cache sieve-metadata-cache update --force`.
+
+  Only yt-dlp uses the proxy; thumbnails, site icons and the devices' browsing still leave
+  from the server. Check it with
+  `docker compose run --rm metadata-cache yt-dlp --proxy socks5://tailscale:1055 --print title <youtube url>`,
+  which prints the video's title rather than the sign-in error.
 - **Reading the database over the network:** set `POSTGRES_BIND=0.0.0.0` (and firewall the
   port). Connect as user `sieve` to database `sieve`.
 - **Backups:** `docker compose exec postgres pg_dump -U sieve sieve > sieve.sql`. Also keep the

@@ -31,18 +31,29 @@ impl Info {
     }
 }
 
-pub async fn info(yt_dlp_bin: &str, url: &str) -> Result<Info, Error> {
-    let child = tokio::process::Command::new(yt_dlp_bin)
-        .args([
-            "--dump-single-json",
-            "--skip-download",
-            "--flat-playlist",
-            "--no-cache-dir",
-            "--no-warnings",
-            "--ignore-config",
-            "--",
-            url,
-        ])
+pub struct YtDlp {
+    pub bin: String,
+    /// Where yt-dlp sends its requests, e.g. `socks5://tailscale:1055`. YouTube makes requests
+    /// from datacentre addresses sign in, so these can go out through a home connection instead.
+    pub proxy: Option<String>,
+}
+
+pub async fn info(yt_dlp: &YtDlp, url: &str) -> Result<Info, Error> {
+    let mut command = tokio::process::Command::new(&yt_dlp.bin);
+    command.args([
+        "--dump-single-json",
+        "--skip-download",
+        "--flat-playlist",
+        "--no-cache-dir",
+        "--no-warnings",
+        "--ignore-config",
+    ]);
+    if let Some(proxy) = &yt_dlp.proxy {
+        command.args(["--proxy", proxy]);
+    }
+
+    let child = command
+        .args(["--", url])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

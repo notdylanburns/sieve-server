@@ -8,7 +8,8 @@ use sieve_common::database::videos::{self, VideoMetadata};
 use sieve_common::database::{MetadataStatus, PgConnection, WorkspaceId, sites, workspaces};
 
 use crate::fetch::{self, Error, Page};
-use crate::{icon, video};
+use crate::video::{self, YtDlp};
+use crate::icon;
 
 const MAX_PASSES: usize = 10;
 
@@ -37,7 +38,7 @@ async fn workspace_ids(conn: &mut PgConnection, scope: Scope) -> Result<Vec<Work
 pub struct Config {
     pub database_url: String,
     pub icon_dir: PathBuf,
-    pub yt_dlp_bin: String,
+    pub yt_dlp: YtDlp,
 }
 
 impl Config {
@@ -45,7 +46,14 @@ impl Config {
         Ok(Self {
             database_url: config::database_url()?,
             icon_dir: config::icon_dir()?,
-            yt_dlp_bin: config::var_or("YT_DLP_BIN", "yt-dlp")?,
+            yt_dlp: YtDlp {
+                bin: config::var_or("YT_DLP_BIN", "yt-dlp")?,
+                proxy: match config::var("YT_DLP_PROXY") {
+                    Ok(proxy) => Some(proxy),
+                    Err(config::Error::Missing(_)) => None,
+                    Err(e) => return Err(e),
+                },
+            },
         })
     }
 }
@@ -69,8 +77,7 @@ pub async fn update(
 
     for pass in 0..MAX_PASSES {
         let force = force && pass == 0;
-        let yt_dlp = config.yt_dlp_bin.as_str();
-        if update_videos_pass(conn, client, icon_dir, yt_dlp, scope, force).await? == 0 {
+        if update_videos_pass(conn, client, icon_dir, &config.yt_dlp, scope, force).await? == 0 {
             break;
         }
     }
@@ -162,7 +169,7 @@ async fn update_videos_pass(
     conn: &mut PgConnection,
     client: &Client,
     icon_dir: &Path,
-    yt_dlp_bin: &str,
+    yt_dlp: &YtDlp,
     scope: Scope,
     force: bool,
 ) -> Result<usize, Error> {
@@ -183,7 +190,7 @@ async fn update_videos_pass(
         info!("fetching metadata for video {}", app.url);
         fetched += 1;
 
-        let info = match video::info(yt_dlp_bin, &app.url).await {
+        let info = match video::info(yt_dlp, &app.url).await {
             Ok(info) => info,
             Err(e) => {
                 warn!("failed to fetch video metadata for {}: {e}", app.url);
@@ -252,7 +259,7 @@ mod tests {
         Config {
             database_url: String::new(),
             icon_dir,
-            yt_dlp_bin: "false".into(),
+            yt_dlp: YtDlp { bin: "false".into(), proxy: None },
         }
     }
 
